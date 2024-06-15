@@ -1,11 +1,14 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState,useCallback } from 'react';
 import Phaser from 'phaser';
 import LNC from '@lightninglabs/lnc-web';
 import Peer from 'peerjs';
 import { Buffer } from 'buffer';
-
+import { generateSecretKey, getPublicKey,finalizeEvent, verifyEvent } from 'nostr-tools/pure';
+import * as nip19 from 'nostr-tools/nip19';
+import { SimplePool } from 'nostr-tools/pool';
 const playerVelocity = 200; // Define a velocity for the player
 const maxMoveRadius = 200; // Define a maximum movement radius
+const relays = ['wss://relay2.nostrchat.io', 'wss://relay1.nostrchat.io']
 
 function generateRandomString(length) {
     const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
@@ -16,6 +19,7 @@ function generateRandomString(length) {
     }
     return result;
 }
+
 const RTSGameScene = new Phaser.Class({
 
     Extends: Phaser.Scene,
@@ -24,16 +28,15 @@ const RTSGameScene = new Phaser.Class({
         Phaser.Scene.call(this, { key: 'RTSGameScene' });
         this.taprootAssets = data.taprootAssets;
         this.assets = data.assets;
-        this.serverId = data.serverId;
         this.peerInstance = data.peer;
         this.assets = data.assets;
+        this.nostrInfo = data.nostrInfo;
         this.connections = []; // Hub only
         this.decodedMetas = [];
     },
 
     preload: async function () {
         this.renderProgessBar();
-
         if(this.assets?.length > 0){
             const collectibles = [];
             for(let item of this.assets){
@@ -51,6 +54,7 @@ const RTSGameScene = new Phaser.Class({
                         })
 
                 } else {
+                  // Change cause "server" will handle it
                   if(item.assetGenesis.name === "testasset0") this.force = item.amount;
                   if(item.assetGenesis.name === "testasset1") this.defense = item.amount;
                 }
@@ -58,10 +62,29 @@ const RTSGameScene = new Phaser.Class({
             this.collectibles = collectibles;
 
         }
+        const pool = new SimplePool()
+        this.pool = pool;
+        let event = await pool.get(relays, {
+          kinds: [42],
+          '#t':['catastrofic-instinct']
+        });
+        if(!event){
+          this.serverId = this.nostrInfo.pk;
+        } else if(event.pubkey !== this.nostrInfo.pk){
+          const tagPeerId = event.tags.filter(tag => tag[0] === 'peerJsId')
+          console.log(event)
+          console.log(tagPeerId)
+          this.serverId = tagPeerId[0][1]
+        } else {
+          this.serverId = this.nostrInfo.pk;
+        }
+        this.handlePeerEvents();
+        this.time.delayedCall(1000,this.sendEnteredGameMsg,[],this);
     },
 
-    create: function () {
-        this.handlePeerEvents();
+    create: async function () {
+
+
         // Create a group to hold units
         this.units = this.physics.add.group({ collideWorldBounds: true });
 
@@ -72,11 +95,11 @@ const RTSGameScene = new Phaser.Class({
         if(this.collectibles?.length > 0){
             this.collectibles.map(item => {
                 return(
-                    setTimeout(() => {
-                        const force = this.force ? this.force/this.collectibles.length : 10;
-                        const defense = this.defense ? this.defense/this.collectibles.length : 10;
-                        this.addUnit(100, 100,item.assetGenesis.name,item.assetGenesis.decodedMeta,force,defense);
-                    },[100])
+                  setTimeout(() => {
+                    const force = this.force ? this.force/this.collectibles.length : 10;
+                    const defense = this.defense ? this.defense/this.collectibles.length : 10;
+                    this.addUnit(100, 100,item.assetGenesis.name,item.assetGenesis.decodedMeta,force,defense);
+                  },100)
                 );
             });
         } else {
@@ -307,36 +330,43 @@ const RTSGameScene = new Phaser.Class({
     },
 
     update: function () {
-        this.friendlyUnits.getChildren().forEach(unit => {
-            if (unit.body.speed > 0) {
-                // Check if the unit has reached its destination
-                const distance = Phaser.Math.Distance.Between(unit.x, unit.y, unit.destinationX, unit.destinationY);
-                if (distance < 4) {
-                    unit.body.setVelocity(0, 0);
-                }
-            }
-        });
-        this.enemyUnits.getChildren().forEach(unit => {
-            if (unit.body.speed > 0) { // Check if the unit is moving
-                // Calculate the distance to the destination
-                const distance = Phaser.Math.Distance.Between(unit.x, unit.y, unit.destinationX, unit.destinationY);
-                if (distance <= 10) { // Threshold value to stop, adjust as needed
-                    unit.body.setVelocity(0, 0); // Stop the unit
-                }
-            }
-        });
-        // Example: Check for collisions between friendly and enemy units
-        this.physics.collide(this.friendlyUnits, this.enemyUnits, (friendly, enemy) => {
-            // Handle collision, e.g., reduce health
-            friendly.body.setVelocity(0,0);
-            enemy.body.setVelocity(0,0);
-            if(friendly.defense < enemy.force){
-              friendly.destroy();
-            } else {
-              enemy.destroy();
-            }
+        if(this.friendlyUnits) {
+          this.friendlyUnits.getChildren().forEach(unit => {
+              if (unit.body.speed > 0) {
+                  // Check if the unit has reached its destination
+                  const distance = Phaser.Math.Distance.Between(unit.x, unit.y, unit.destinationX, unit.destinationY);
+                  if (distance < 4) {
+                      unit.body.setVelocity(0, 0);
+                  }
+              }
+          });
+        }
 
-        });
+        if(this.enemyUnits){
+          this.enemyUnits.getChildren().forEach(unit => {
+              if (unit.body.speed > 0) { // Check if the unit is moving
+                  // Calculate the distance to the destination
+                  const distance = Phaser.Math.Distance.Between(unit.x, unit.y, unit.destinationX, unit.destinationY);
+                  if (distance <= 10) { // Threshold value to stop, adjust as needed
+                      unit.body.setVelocity(0, 0); // Stop the unit
+                  }
+              }
+          });
+        }
+        if(this.enemyUnits && this.friendlyUnits){
+          // Example: Check for collisions between friendly and enemy units
+          this.physics.collide(this.friendlyUnits, this.enemyUnits, (friendly, enemy) => {
+              // Handle collision, e.g., reduce health
+              friendly.body.setVelocity(0,0);
+              enemy.body.setVelocity(0,0);
+              if(friendly.defense < enemy.force){
+                friendly.destroy();
+              } else {
+                enemy.destroy();
+              }
+
+          });
+        }
     },
     reactToData: function(msg) {
         // Handle data received from PeerJS in Phaser
@@ -476,20 +506,48 @@ const RTSGameScene = new Phaser.Class({
         conn.on('close', () => {
             console.log("Connection closed");
         });
+        // If error, make it server
+        this.peerInstance.on('error', (err) => {
+            console.error('PeerJS error:', err);
+            this.serverId =  this.nostrInfo.pk;
+            if(conn){
+              conn.close();
+            }
+            this.handleHubConn();
+        });
+    },
+
+    sendEnteredGameMsg: async function(){
+      //this.peer.on()
+      let signedEvent = finalizeEvent({
+        kind: 42,
+        pubkey: this.nostrInfo.pk,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [
+          ['e','898e07640acb798a0f8c63099a422cc5f5cf5eb4185f2911f84ce8bc1570bcc4','','root'],
+          ['t', 'catastrofic-instinct'],
+          ['peerJsId', this.serverId]
+        ],
+        content: this.serverId ===  this.nostrInfo.pk ? `Just entered as the server!` : `Just entered at server ${this.serverId}!`
+      }, this.nostrInfo.sk);
+      let isGood = verifyEvent(signedEvent);
+      console.log(`Event signed: ${isGood}`);
+      if(!isGood) return;
+      await Promise.any(this.pool.publish(relays, signedEvent));
+
     }
 });
 
 const PhaserGame = () => {
     const gameContainer = useRef();
     const [peer, setPeer] = useState(null);
-    const [peerId,setPeerId] = useState(null);
 
     const [gameStarted, setGameStarted] = useState(false);
     const [pairingPhrase, setPairingPhrase] = useState('');
-    const [serverId, setServerId] = useState('');
     const [lndInfo, setLndInfo] = useState(null);
     const [taprootAssets, setTaprootAssets] = useState(1);
     const [assets, setAssets] = useState([]);
+    const [nostrInfo,setNostrInfo] = useState();
 
     const connectLNC = () => {
         if (pairingPhrase) {
@@ -511,14 +569,30 @@ const PhaserGame = () => {
 
                         let assetsArr = [];
                         for(let asset of assetsTap.assets){
+
+                            const proof = await tapd.taprootAssets.exportProof({
+                              asset_id: asset.assetGenesis.assetId,
+                              script_key: asset.scriptKey
+                            });
+                            /*
+                            console.log(proof.rawProofFile.replace(/\+/g, '-').replace(/\//g, '_'))
+                            const validation = await tapd.taprootAssets.verifyProof({
+                              raw_proof_file: proof.rawProofFile.replace(/\+/g, '-').replace(/\//g, '_')
+                            });
+                            console.log(validation);
+                            */
                             if(asset.assetGenesis.assetType === "COLLECTIBLE"){
                                 const meta = await tapd.taprootAssets.fetchAssetMeta({asset_id: asset.assetGenesis.assetId.replace(/\+/g, '-').replace(/\//g, '_')});
                                 assetsArr.push({
                                     ...asset,
-                                    decodedMeta: Buffer.from(meta.data,'base64').toString('utf8')
+                                    decodedMeta: Buffer.from(meta.data,'base64').toString('utf8'),
+                                    rawProofFile: proof.rawProofFile.replace(/\+/g, '-').replace(/\//g, '_')
                                 });
                             } else {
-                                assetsArr.push(asset);
+                                assetsArr.push({
+                                  ...asset,
+                                  rawProofFile: proof.rawProofFile.replace(/\+/g, '-').replace(/\//g, '_')
+                                });
                             }
                         }
                         console.log(assetsArr)
@@ -545,12 +619,28 @@ const PhaserGame = () => {
             setTaprootAssets(1);
         }
     };
+
+    useEffect(() => {
+      let sk //= Uint8Array.from(atob(localStorage.getItem('nostr-sk')),c => c.charCodeAt(0));
+      if(!sk){
+        sk = generateSecretKey();
+      }
+      localStorage.setItem('nostr-sk',sk);
+      let pk = getPublicKey(sk)
+      let npub = nip19.npubEncode(pk)
+      setNostrInfo({
+        pk: pk,
+        npub: npub,
+        sk: sk
+      });
+      return;
+    },[]);
     useEffect(() => {
         console.log(assets)
     },[assets])
 
     useEffect(() => {
-        if (taprootAssets && assets && gameStarted && peer) {
+        if (taprootAssets && assets && gameStarted && peer && nostrInfo) {
             const config = {
                 type: Phaser.AUTO,
                 width: 800,
@@ -561,7 +651,7 @@ const PhaserGame = () => {
                         debug: false
                     }
                 },
-                scene: new RTSGameScene({ taprootAssets, serverId,peer,assets }),
+                scene: new RTSGameScene({ taprootAssets,peer,assets,nostrInfo }),
                 parent: gameContainer.current
             };
             const game = new Phaser.Game(config);
@@ -570,25 +660,27 @@ const PhaserGame = () => {
                 game.destroy(true);
             };
         }
-    }, [taprootAssets, gameStarted,serverId,peer,assets]);
+    }, [taprootAssets, gameStarted,peer,assets,nostrInfo]);
 
-    const handleStartGame = (event) => {
+    const handleStartGame = useCallback((event) => {
         event.preventDefault();
-        let peerInstance;
+        let peerInstance = new Peer(nostrInfo.pk);
+        /*
         if(!serverId){
             peerInstance = new Peer("testHubPeerJs")
         } else {
-            peerInstance = new Peer();
+            peerInstance = new Peer(nostrInfo.pk);
         }
+        */
         peerInstance.on('open',(id) => {
-            setPeerId(id);
+            console.log(`Initiated peerjs with id ${id}`)
             setPeer(peerInstance);
             setGameStarted(true);
         });
         return () => {
             peerInstance.destroy();
         };
-    };
+    },[nostrInfo]);
 
     return (
         <div>
@@ -607,16 +699,6 @@ const PhaserGame = () => {
                         <button onClick={connectLNC}>LNC Connect</button>
                     </div>
                     <div>
-                        <label>
-                            Peer ID (leave blank to create new server):
-                            <input
-                                type="text"
-                                value={serverId}
-                                onChange={(e) => setServerId(e.target.value)}
-                            />
-                        </label>
-                    </div>
-                    <div>
                         <button onClick={handleStartGame}>Start Game</button>
                     </div>
 
@@ -626,7 +708,8 @@ const PhaserGame = () => {
                 <div ref={gameContainer} style={{ width: '800px', height: '600px' }} />
             )}
             <div>
-                <p>Your peerId: {peerId}</p>
+                {/*<p>Nostr npub: {nostrInfo?.npub}</p>*/}
+                <p>Your peerId: {nostrInfo?.pk}</p>
                 {
                     lndInfo &&
                     <>
