@@ -621,8 +621,10 @@ const PhaserGame = () => {
     };
 
     useEffect(() => {
-      let sk //= Uint8Array.from(atob(localStorage.getItem('nostr-sk')),c => c.charCodeAt(0));
-      if(!sk){
+      let sk
+      if(localStorage.getItem('nostr-sk')){
+        sk = new Uint8Array(localStorage.getItem('nostr-sk').split(","));
+      } else {
         sk = generateSecretKey();
       }
       localStorage.setItem('nostr-sk',sk);
