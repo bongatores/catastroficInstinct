@@ -11,7 +11,11 @@ import { Relay } from 'nostr-tools/relay'
 
 import RTSGameScene from "./RTSGameScene"
 const marketPubKey = "748435f3920646e47889c83a9ce4a44fe75cb54ec926f319593770de24aeca36";
-
+const base64UrlEncode = (input) => {
+  let base64 = Buffer.from(input, 'hex').toString('base64');
+  let base64Url = base64.replace(/\+/g, '-').replace(/\//g, '_');
+  return base64Url;
+};
 const PhaserGame = () => {
     const gameContainer = useRef();
     const [peer, setPeer] = useState(null);
@@ -119,38 +123,7 @@ const PhaserGame = () => {
             peerInstance.destroy();
         };
     },[nostrInfo]);
-    const handleEvent = useCallback(async (event) => {
-      if(!nostrInfo || !relay ) return;
-      const message = await nip04.decrypt(nostrInfo.sk,event.pubkey,event.content);
-      console.log(message)
-      if(message.startsWith("Invoice: ") && router){
-        const invoice = JSON.parse(message.split("Invoice: ")[1]);
-        console.log(invoice)
-        console.log(lnd)
-        console.log(await lnd.getInfo())
-        router.SendPaymentV2({
-          paymentRequest: invoice.payment_request,
-          allowSelfPayment: true,
-          feeLimitSat: 10,
-          timeoutSeconds: 60,
-          maxParts: 16
-        },(msg) => {
-          console.log(msg);
-          if(msg.status === "SUCCEEDED"){
-            // Generate taproot invoice, send to service with nostr and receive message about taproot invoice paid
-          }
-        },(err) => {
-          console.error(err)
-        });
-      } else {
-        try{
-          setEvents(JSON.parse(message).assets)
-        }catch(err){
-          console.error(err)
-        }
-      };
 
-    },[relay,nostrInfo,lnd,router]);
     const sendMessage = useCallback(async (message) => {
         if(!nostrInfo || !relay) return;
         if(message === "ListAssets"){
@@ -179,7 +152,64 @@ const PhaserGame = () => {
         console.log("published")
     },[nostrInfo,relay]);
 
+    const handleEvent = useCallback(async (event) => {
+      if(!nostrInfo || !relay ) return;
+      const message = await nip04.decrypt(nostrInfo.sk,event.pubkey,event.content);
+      console.log(message)
+      if(message.startsWith("Invoice: ") && router){
+        const invoice = JSON.parse(message.split("Invoice: ")[1]);
+        console.log(invoice)
+        console.log(lnd)
+        console.log(await lnd.getInfo())
+        router.SendPaymentV2({
+          paymentRequest: invoice.payment_request,
+          allowSelfPayment: true,
+          feeLimitSat: 10,
+          timeoutSeconds: 60,
+          maxParts: 16
+        },async (msg) => {
+          console.log(msg);
+          if(msg.status === "SUCCEEDED"){
+            // Generate taproot invoice, send to service with nostr and receive message about taproot invoice paid
+            const assetId = invoice.assetId;
+            console.log(assetId)
+            const amt = invoice.assetAmt;
+            const taprootAddr = await taprootAssets.newAddr({
+              assetId: base64UrlEncode(assetId),
+              amt: amt.toString()
+            });
+            /* According to https://docs.lightning.engineering/the-lightning-network/taproot-assets/faq lightning transfer is not posible yet
+            const taprootInvoice = await lnd.addInvoice({
+              memo: invoice.r_hash,
+              value: 0,
+              fallback_addr: taprootAddr.encoded // This does not works: rpc error: code = Unknown desc = invalid fallback address: decoded address is of unknown format
+            });
+            console.log(taprootInvoice);
 
+            sendMessage(`TaprootInvoice: ${JSON.stringify(taprootInvoice)}`);
+            */
+            sendMessage(`TaprootInvoice: ${JSON.stringify({
+              r_hash: invoice.r_hash, //Should be inside invoice memo
+              ...taprootAddr
+            })}`);
+          }
+        },(err) => {
+          console.error(err)
+        });
+      } else if(message.startsWith("AssetSent: ")){
+        const transfer = JSON.parse(message.split("AssetSent: ")[1]);
+        alert(`Transfer done: ${transfer.outpoint} wait confirmation`);
+
+      } else {
+        // Assets available to be sold from the game's tapd node
+        try{
+          setEvents(JSON.parse(message).assets)
+        }catch(err){
+          console.error(err)
+        }
+      };
+
+    },[relay,nostrInfo,lnd,router,sendMessage,taprootAssets]);
 
     useEffect(() => {
       let sk
